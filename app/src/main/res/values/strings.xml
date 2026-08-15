@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Codex 随行</string>
+    <string name="tunnel_channel_name">远程连接</string>
+    <string name="tunnel_channel_description">保持与电脑端 Codex 随行服务的安全连接</string>
+</resources>
