@@ -10,35 +10,6 @@
         android:layout_height="match_parent"
         android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/connectionPill"
-        android:layout_width="wrap_content"
-        android:layout_height="32dp"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="8dp"
-        android:background="@drawable/status_pill_background"
-        android:gravity="center"
-        android:maxWidth="280dp"
-        android:paddingStart="14dp"
-        android:paddingEnd="14dp"
-        android:textColor="@color/ink"
-        android:textSize="12sp"
-        android:visibility="gone" />
-
-    <ImageButton
-        android:id="@+id/nativeSettingsButton"
-        android:layout_width="38dp"
-        android:layout_height="38dp"
-        android:layout_gravity="top|end"
-        android:layout_marginTop="6dp"
-        android:layout_marginEnd="6dp"
-        android:background="@drawable/status_pill_background"
-        android:contentDescription="连接设置"
-        android:padding="9dp"
-        android:scaleType="centerInside"
-        android:src="@drawable/ic_settings"
-        android:visibility="gone" />
-
     <ScrollView
         android:id="@+id/setupScroll"
         android:layout_width="match_parent"

@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.view.View
 import android.view.inputmethod.InputMethodManager
@@ -24,7 +25,6 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -46,6 +46,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.ningmengchang.codexcompanion.config.AuthMode
 import com.ningmengchang.codexcompanion.config.ConfigStore
 import com.ningmengchang.codexcompanion.config.ConnectionConfig
+import com.ningmengchang.codexcompanion.download.ArtifactDownloadRequest
+import com.ningmengchang.codexcompanion.download.NativeDownloadManager
+import com.ningmengchang.codexcompanion.download.PreparedArtifactDownload
+import com.ningmengchang.codexcompanion.navigation.BackAction
+import com.ningmengchang.codexcompanion.navigation.BackNavigationPolicy
+import com.ningmengchang.codexcompanion.navigation.BackNavigationSnapshot
 import com.ningmengchang.codexcompanion.share.NativeShareBridge
 import com.ningmengchang.codexcompanion.share.NativeShareManager
 import com.ningmengchang.codexcompanion.tunnel.TunnelRuntime
@@ -53,6 +59,7 @@ import com.ningmengchang.codexcompanion.tunnel.TunnelService
 import com.ningmengchang.codexcompanion.tunnel.TunnelState
 import com.ningmengchang.codexcompanion.web.LocalOnlyWebViewClient
 import com.ningmengchang.codexcompanion.web.NativeUiBridge
+import com.ningmengchang.codexcompanion.web.NativeUiPatch
 import java.io.FileOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -63,14 +70,13 @@ import kotlin.math.max
 class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private lateinit var configStore: ConfigStore
     private lateinit var shareManager: NativeShareManager
+    private lateinit var downloadManager: NativeDownloadManager
 
     private lateinit var root: View
     private lateinit var webView: WebView
     private lateinit var setupScroll: ScrollView
     private lateinit var loadingOverlay: View
     private lateinit var loadingText: TextView
-    private lateinit var connectionPill: TextView
-    private lateinit var nativeSettingsButton: ImageButton
     private lateinit var setupStatusText: TextView
     private lateinit var connectButton: Button
     private lateinit var disconnectButton: Button
@@ -96,11 +102,22 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private var approvalDialogKey: String? = null
     private var currentTunnelState: TunnelState = TunnelState.Idle
     private var webFileCallback: ValueCallback<Array<Uri>>? = null
-    private var webDialogOpen = false
+    private var pendingDownload: PreparedArtifactDownload? = null
+    private var webBackPending = false
+    private var rootBackArmedAt = 0L
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { startTunnel() }
+
+    private val legacyStoragePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val download = pendingDownload
+        pendingDownload = null
+        if (granted && download != null) enqueueDownload(download)
+        else if (!granted) Toast.makeText(this, "没有存储权限，文件未下载", Toast.LENGTH_LONG).show()
+    }
 
     private val privateKeyLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -123,16 +140,18 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         setContentView(R.layout.activity_main)
         configStore = ConfigStore(this)
         bindViews()
+        downloadManager = NativeDownloadManager(this)
         configureWindowInsets()
         configureForm()
         configureWebView()
         shareManager = NativeShareManager(this, { activeConfig().localServicePort }, this)
         webView.addJavascriptInterface(NativeShareBridge(shareManager), NATIVE_SHARE_BRIDGE)
         webView.addJavascriptInterface(
-            NativeUiBridge { open ->
+            NativeUiBridge {
                 runOnUiThread {
-                    webDialogOpen = open
-                    updateNativeSettingsButtonVisibility()
+                    resetRootBackConfirmation()
+                    populateForm(configStore.load())
+                    showSetup()
                 }
             },
             NATIVE_UI_BRIDGE,
@@ -178,8 +197,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         setupScroll = findViewById(R.id.setupScroll)
         loadingOverlay = findViewById(R.id.loadingOverlay)
         loadingText = findViewById(R.id.loadingText)
-        connectionPill = findViewById(R.id.connectionPill)
-        nativeSettingsButton = findViewById(R.id.nativeSettingsButton)
         setupStatusText = findViewById(R.id.setupStatusText)
         connectButton = findViewById(R.id.connectButton)
         disconnectButton = findViewById(R.id.disconnectButton)
@@ -251,10 +268,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         findViewById<Button>(R.id.importKeyButton).setOnClickListener {
             privateKeyLauncher.launch(arrayOf("*/*"))
         }
-        nativeSettingsButton.setOnClickListener {
-            populateForm(configStore.load())
-            showSetup()
-        }
         findViewById<Button>(R.id.cancelShareButton).setOnClickListener {
             shareManager.cancelActiveShare()
         }
@@ -287,8 +300,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         webView.webViewClient = LocalOnlyWebViewClient(
             localPort = { activeConfig().localServicePort },
             onPageStarted = {
-                webDialogOpen = false
-                updateNativeSettingsButtonVisibility()
                 if (!pageReady) showLoading("正在加载 Codex 随行…")
             },
             onPageReady = {
@@ -296,8 +307,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
                 loadingOverlay.visibility = View.GONE
                 setupScroll.visibility = View.GONE
                 webView.visibility = View.VISIBLE
-                updateNativeSettingsButtonVisibility()
-                connectionPill.visibility = View.GONE
                 hideSystemBars()
                 ViewCompat.requestApplyInsets(root)
             },
@@ -333,6 +342,43 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
                 }
             }
         }
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            handleWebDownload(
+                ArtifactDownloadRequest(
+                    url = url.orEmpty(),
+                    userAgent = userAgent.orEmpty(),
+                    contentDisposition = contentDisposition.orEmpty(),
+                    mimeType = mimeType.orEmpty(),
+                ),
+            )
+        }
+    }
+
+    private fun handleWebDownload(request: ArtifactDownloadRequest) {
+        val prepared = downloadManager.prepare(request, activeConfig().localServicePort)
+            .getOrElse { error ->
+                Toast.makeText(this, error.message ?: "下载链接无效", Toast.LENGTH_LONG).show()
+                return
+            }
+        if (
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingDownload = prepared
+            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
+        enqueueDownload(prepared)
+    }
+
+    private fun enqueueDownload(download: PreparedArtifactDownload) {
+        downloadManager.enqueue(download)
+            .onSuccess {
+                Toast.makeText(this, "已开始下载“${download.displayName}”，可在通知栏查看", Toast.LENGTH_LONG).show()
+            }
+            .onFailure { error ->
+                Toast.makeText(this, error.message ?: "无法启动下载", Toast.LENGTH_LONG).show()
+            }
     }
 
     private fun observeTunnel() {
@@ -349,11 +395,10 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private fun renderTunnelState(state: TunnelState) {
         when (state) {
             TunnelState.Idle -> {
-                connectionPill.visibility = View.GONE
                 if (loadingOverlay.visibility == View.VISIBLE) showSetup()
             }
             is TunnelState.Connecting -> {
-                if (pageReady) showConnectionPill(state.message)
+                if (pageReady) showWeb()
                 else showLoading(state.message)
             }
             is TunnelState.AwaitingHostApproval -> showHostApproval(state)
@@ -371,7 +416,7 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
             }
             is TunnelState.Reconnecting -> {
                 val message = "连接中断，${state.delaySeconds} 秒后重试"
-                if (pageReady) showConnectionPill(message) else showLoading(message)
+                if (pageReady) showWeb() else showLoading(message)
             }
             is TunnelState.Error -> {
                 approvalDialogKey = null
@@ -512,8 +557,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         showSystemBars()
         loadingOverlay.visibility = View.GONE
         webView.visibility = View.GONE
-        nativeSettingsButton.visibility = View.GONE
-        connectionPill.visibility = View.GONE
         setupScroll.visibility = View.VISIBLE
         disconnectButton.visibility = if (currentTunnelState is TunnelState.Connected) View.VISIBLE else View.GONE
         connectButton.text = if (currentTunnelState is TunnelState.Connected) "保存并重新连接" else "保存并连接"
@@ -533,8 +576,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private fun showLoading(message: String) {
         setupScroll.visibility = View.GONE
         webView.visibility = View.GONE
-        nativeSettingsButton.visibility = View.GONE
-        connectionPill.visibility = View.GONE
         loadingText.text = message
         loadingOverlay.visibility = View.VISIBLE
         ViewCompat.requestApplyInsets(root)
@@ -544,39 +585,78 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         setupScroll.visibility = View.GONE
         loadingOverlay.visibility = View.GONE
         webView.visibility = View.VISIBLE
-        updateNativeSettingsButtonVisibility()
         hideSystemBars()
         ViewCompat.requestApplyInsets(root)
-    }
-
-    private fun showConnectionPill(message: String) {
-        setupScroll.visibility = View.GONE
-        loadingOverlay.visibility = View.GONE
-        webView.visibility = View.VISIBLE
-        updateNativeSettingsButtonVisibility()
-        connectionPill.text = message
-        connectionPill.visibility = View.VISIBLE
-        ViewCompat.requestApplyInsets(root)
-    }
-
-    private fun updateNativeSettingsButtonVisibility() {
-        val webActive = webView.visibility == View.VISIBLE &&
-            setupScroll.visibility != View.VISIBLE &&
-            loadingOverlay.visibility != View.VISIBLE
-        nativeSettingsButton.visibility = if (webActive && !webDialogOpen) View.VISIBLE else View.GONE
     }
 
     private fun configureBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                when {
-                    shareProgressPanel.visibility == View.VISIBLE -> shareManager.cancelActiveShare()
-                    setupScroll.visibility == View.VISIBLE && currentTunnelState is TunnelState.Connected -> showWeb()
-                    webView.visibility == View.VISIBLE && webView.canGoBack() -> webView.goBack()
-                    else -> moveTaskToBack(true)
+                val action = BackNavigationPolicy.decide(
+                    BackNavigationSnapshot(
+                        shareInProgress = shareProgressPanel.visibility == View.VISIBLE,
+                        setupVisible = setupScroll.visibility == View.VISIBLE,
+                        webVisible = webView.visibility == View.VISIBLE,
+                        tunnelConnected = currentTunnelState is TunnelState.Connected,
+                    ),
+                )
+                when (action) {
+                    BackAction.CANCEL_SHARE -> {
+                        resetRootBackConfirmation()
+                        shareManager.cancelActiveShare()
+                    }
+                    BackAction.RETURN_TO_WEB -> {
+                        resetRootBackConfirmation()
+                        showWeb()
+                    }
+                    BackAction.DELEGATE_TO_WEB -> handleWebBack()
+                    BackAction.CONFIRM_BACKGROUND -> confirmBackground()
                 }
             }
         })
+    }
+
+    private fun handleWebBack() {
+        if (webBackPending) return
+        webBackPending = true
+        webView.evaluateJavascript(NativeUiPatch.handleBackScript) { rawResult ->
+            webBackPending = false
+            if (BackNavigationPolicy.javascriptConsumed(rawResult)) {
+                resetRootBackConfirmation()
+                return@evaluateJavascript
+            }
+            if (canGoBackWithinApp()) {
+                resetRootBackConfirmation()
+                webView.goBack()
+            } else {
+                confirmBackground()
+            }
+        }
+    }
+
+    private fun canGoBackWithinApp(): Boolean {
+        val history = webView.copyBackForwardList()
+        if (history.currentIndex <= 0) return false
+        val previousUrl = history.getItemAtIndex(history.currentIndex - 1)?.url ?: return false
+        val port = connectedUrl?.let { runCatching { Uri.parse(it).port }.getOrNull() }
+            ?.takeIf { it > 0 }
+            ?: configStore.load().localServicePort
+        return LocalOnlyWebViewClient.isAllowed(previousUrl, port)
+    }
+
+    private fun confirmBackground() {
+        val now = SystemClock.elapsedRealtime()
+        if (rootBackArmedAt > 0 && now - rootBackArmedAt <= ROOT_BACK_CONFIRM_MS) {
+            rootBackArmedAt = 0L
+            moveTaskToBack(true)
+            return
+        }
+        rootBackArmedAt = now
+        Toast.makeText(this, "已到首页，再按一次返回桌面", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun resetRootBackConfirmation() {
+        rootBackArmedAt = 0L
     }
 
     private fun hideKeyboard() {
@@ -640,5 +720,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         const val NATIVE_SHARE_BRIDGE = "CodexNativeShare"
         const val NATIVE_UI_BRIDGE = "CodexNativeUi"
         const val MAX_PRIVATE_KEY_BYTES = 2L * 1024L * 1024L
+        const val ROOT_BACK_CONFIRM_MS = 2_000L
     }
 }

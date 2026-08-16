@@ -6,13 +6,12 @@ import org.junit.Test
 
 class NativeUiBridgeTest {
     @Test
-    fun forwardsDialogStateToNativeListener() {
-        val states = mutableListOf<Boolean>()
-        val bridge = NativeUiBridge(states::add)
+    fun forwardsConnectionSettingsRequestToNativeListener() {
+        var requests = 0
+        val bridge = NativeUiBridge { requests += 1 }
 
-        bridge.setDialogOpen(true)
-        bridge.setDialogOpen(false)
+        bridge.openConnectionSettings()
 
-        assertEquals(listOf(true, false), states)
+        assertEquals(1, requests)
     }
 }

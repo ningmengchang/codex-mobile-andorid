@@ -23,8 +23,7 @@ class LocalOnlyWebViewClient(
     override fun onPageFinished(view: WebView, url: String?) {
         if (url == null || !isAllowed(url, localPort())) return
         view.evaluateJavascript(NativeSharePatch.script, null)
-        view.evaluateJavascript(NativeUiPatch.script, null)
-        onPageReady()
+        view.evaluateJavascript(NativeUiPatch.script) { onPageReady() }
     }
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
