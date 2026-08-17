@@ -5,12 +5,6 @@ object NativeUiPatch {
         (() => {
           const activeViewName = () => document.querySelector('.view.active')?.dataset?.view || null;
           const openDialogs = () => Array.from(document.querySelectorAll('dialog[open]'));
-          const state = window.__codexNativeNavigationState || {
-            currentView: activeViewName(),
-            viewStack: [],
-            suppressTarget: null,
-          };
-          window.__codexNativeNavigationState = state;
 
           const hideWebFullscreenButton = () => {
             const button = document.getElementById('fullscreenButton');
@@ -40,34 +34,6 @@ object NativeUiPatch {
               } catch (_) {}
             });
             body.append(button);
-          };
-
-          const recordActiveView = () => {
-            const active = activeViewName();
-            if (!active || active === state.currentView) return;
-            if (state.suppressTarget === active) {
-              state.suppressTarget = null;
-            } else if (state.currentView) {
-              if (state.viewStack[state.viewStack.length - 1] !== state.currentView) {
-                state.viewStack.push(state.currentView);
-                if (state.viewStack.length > 32) state.viewStack.shift();
-              }
-            }
-            state.currentView = active;
-          };
-
-          const goToView = (target) => {
-            const button = Array.from(document.querySelectorAll('.bottom-nav button[data-tab]'))
-              .find((candidate) => candidate.dataset?.tab === target);
-            if (!button) return false;
-            state.suppressTarget = target;
-            button.click();
-            recordActiveView();
-            if (activeViewName() !== target) {
-              state.suppressTarget = null;
-              return false;
-            }
-            return true;
           };
 
           const closeTopDialog = () => {
@@ -101,14 +67,10 @@ object NativeUiPatch {
             return true;
           };
 
-          const goToPreviousView = () => {
-            recordActiveView();
-            while (state.viewStack.length) {
-              const target = state.viewStack.pop();
-              if (target && target !== state.currentView && goToView(target)) return true;
-            }
-            if (state.currentView && state.currentView !== 'chat') return goToView('chat');
-            return false;
+          const navigateWebHistory = () => {
+            if (activeViewName() === 'threads') return false;
+            history.back();
+            return true;
           };
 
           window.__codexNativeUiBack = () => (
@@ -116,12 +78,11 @@ object NativeUiPatch {
             || closeFilePopover()
             || leaveFullscreen()
             || goUpDirectory()
-            || goToPreviousView()
+            || navigateWebHistory()
           );
           window.__codexNativeUiRefresh = () => {
             hideWebFullscreenButton();
             installConnectionSettingsEntry();
-            recordActiveView();
           };
 
           if (window.__codexNativeUiPatched) {
@@ -129,17 +90,6 @@ object NativeUiPatch {
             return;
           }
           window.__codexNativeUiPatched = true;
-
-          const viewObserver = new MutationObserver((mutations) => {
-            if (mutations.some((mutation) => mutation.target?.classList?.contains('view'))) {
-              recordActiveView();
-            }
-          });
-          viewObserver.observe(document.getElementById('app') || document.documentElement, {
-            attributes: true,
-            attributeFilter: ['class'],
-            subtree: true,
-          });
 
           window.__codexNativeUiRefresh();
         })();

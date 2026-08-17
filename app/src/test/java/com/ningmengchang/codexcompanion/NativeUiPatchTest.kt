@@ -6,12 +6,14 @@ import org.junit.Test
 
 class NativeUiPatchTest {
     @Test
-    fun patchProvidesLayeredSinglePageBackNavigation() {
+    fun patchDelegatesPageHistoryToWebViewAfterClosingTransientLayers() {
         val script = NativeUiPatch.script
 
         assertTrue(script.contains("closeTopDialog"))
         assertTrue(script.contains("goUpDirectory"))
-        assertTrue(script.contains("goToPreviousView"))
+        assertTrue(script.contains("navigateWebHistory"))
+        assertTrue(script.contains("activeViewName() === 'threads'"))
+        assertTrue(!script.contains("goToPreviousView"))
         assertTrue(script.contains("hideWebFullscreenButton"))
         assertTrue(script.contains("fullscreenButton"))
         assertTrue(script.contains("nativeConnectionSettingsButton"))
