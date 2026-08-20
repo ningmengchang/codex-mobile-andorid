@@ -52,6 +52,8 @@ import com.ningmengchang.codexcompanion.download.PreparedArtifactDownload
 import com.ningmengchang.codexcompanion.navigation.BackAction
 import com.ningmengchang.codexcompanion.navigation.BackNavigationPolicy
 import com.ningmengchang.codexcompanion.navigation.BackNavigationSnapshot
+import com.ningmengchang.codexcompanion.notification.NativeNotificationBridge
+import com.ningmengchang.codexcompanion.notification.ThreadStatusNotifier
 import com.ningmengchang.codexcompanion.share.NativeShareBridge
 import com.ningmengchang.codexcompanion.share.NativeShareManager
 import com.ningmengchang.codexcompanion.tunnel.TunnelRuntime
@@ -71,6 +73,7 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private lateinit var configStore: ConfigStore
     private lateinit var shareManager: NativeShareManager
     private lateinit var downloadManager: NativeDownloadManager
+    private lateinit var threadStatusNotifier: ThreadStatusNotifier
 
     private lateinit var root: View
     private lateinit var webView: WebView
@@ -141,11 +144,16 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         configStore = ConfigStore(this)
         bindViews()
         downloadManager = NativeDownloadManager(this)
+        threadStatusNotifier = ThreadStatusNotifier(this)
         configureWindowInsets()
         configureForm()
         configureWebView()
         shareManager = NativeShareManager(this, { activeConfig().localServicePort }, this)
         webView.addJavascriptInterface(NativeShareBridge(shareManager), NATIVE_SHARE_BRIDGE)
+        webView.addJavascriptInterface(
+            NativeNotificationBridge(threadStatusNotifier::notify),
+            NATIVE_NOTIFICATION_BRIDGE,
+        )
         webView.addJavascriptInterface(
             NativeUiBridge {
                 runOnUiThread {
@@ -184,6 +192,7 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         if (!isChangingConfigurations) {
             shareManager.close()
             webView.removeJavascriptInterface(NATIVE_SHARE_BRIDGE)
+            webView.removeJavascriptInterface(NATIVE_NOTIFICATION_BRIDGE)
             webView.removeJavascriptInterface(NATIVE_UI_BRIDGE)
             webView.stopLoading()
             webView.destroy()
@@ -718,6 +727,7 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
 
     private companion object {
         const val NATIVE_SHARE_BRIDGE = "CodexNativeShare"
+        const val NATIVE_NOTIFICATION_BRIDGE = "CodexNativeNotifications"
         const val NATIVE_UI_BRIDGE = "CodexNativeUi"
         const val MAX_PRIVATE_KEY_BYTES = 2L * 1024L * 1024L
         const val ROOT_BACK_CONFIRM_MS = 2_000L

@@ -17,7 +17,6 @@ function extractScript(name) {
 
 const patchScript = extractScript('script');
 const handleBackScript = extractScript('handleBackScript');
-const observers = [];
 let nativeSettingsRequests = 0;
 const views = new Map();
 
@@ -43,17 +42,8 @@ view('threads');
 view('favorites');
 view('projects');
 
-function trigger(attributeName, target) {
-  for (const observer of observers) {
-    if (observer.options.attributeFilter.includes(attributeName)) {
-      observer.callback([{ attributeName, target }]);
-    }
-  }
-}
-
 function setActiveView(name) {
   for (const [viewName, item] of views) item.classList.toggle('active', viewName === name);
-  trigger('class', views.get(name));
 }
 
 const buttons = [...views.keys()].map((name) => ({
@@ -100,18 +90,6 @@ const fullscreenButton = {
   setAttribute(name, value) { this.attributes[name] = value; },
 };
 
-class MockMutationObserver {
-  constructor(callback) {
-    this.callback = callback;
-    observers.push(this);
-  }
-
-  observe(target, options) {
-    this.target = target;
-    this.options = options;
-  }
-}
-
 const document = {
   documentElement: {},
   fullscreenElement: null,
@@ -156,11 +134,13 @@ const document = {
 const window = {
   CodexNativeUi: { openConnectionSettings: () => { nativeSettingsRequests += 1; } },
 };
-const context = { window, document, MutationObserver: MockMutationObserver };
+const history = {
+  backCalls: 0,
+  back() { this.backCalls += 1; },
+};
+const context = { window, document, history };
 
 vm.runInNewContext(patchScript, context, { filename: 'NativeUiPatch.js' });
-assert.equal(observers.length, 1);
-assert.deepEqual([...observers[0].options.attributeFilter], ['class']);
 assert.equal(fullscreenButton.hidden, true);
 assert.equal(fullscreenButton.tabIndex, -1);
 assert.equal(fullscreenButton.attributes['aria-hidden'], 'true');
@@ -177,9 +157,8 @@ assert.equal(nativeSettingsRequests, 1);
 setActiveView('threads');
 setActiveView('chat');
 assert.equal(window.__codexNativeUiBack(), true);
-assert.equal(document.querySelector('.view.active').dataset.view, 'threads');
-assert.equal(window.__codexNativeUiBack(), true);
 assert.equal(document.querySelector('.view.active').dataset.view, 'chat');
+assert.equal(history.backCalls, 1);
 
 const dialog = {
   open: true,
@@ -201,18 +180,16 @@ assert.equal(window.__codexNativeUiBack(), true);
 assert.equal(projectUpButton.clicks, 1);
 projectUpButton.hidden = true;
 assert.equal(window.__codexNativeUiBack(), true);
-assert.equal(document.querySelector('.view.active').dataset.view, 'chat');
+assert.equal(history.backCalls, 2);
 
 document.fullscreenElement = {};
 assert.equal(window.__codexNativeUiBack(), true);
 assert.equal(document.fullscreenElement, null);
 
-window.__codexNativeNavigationState.viewStack.length = 0;
-window.__codexNativeNavigationState.currentView = 'chat';
+setActiveView('threads');
 assert.equal(vm.runInNewContext(handleBackScript, context), false);
 
 vm.runInNewContext(patchScript, context, { filename: 'NativeUiPatch-reinject.js' });
 assert.equal(settingsBody.children.length, 1, 'reinjection must not duplicate the settings entry');
-assert.equal(observers.length, 1, 'reinjection must not install duplicate observers');
 
 console.log('Native UI navigation patch smoke test passed');
