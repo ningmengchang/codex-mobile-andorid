@@ -60,6 +60,10 @@ const settingsBody = {
   children: [],
   append(child) { this.children.push(child); },
 };
+const documentHead = {
+  children: [],
+  append(child) { this.children.push(child); },
+};
 const filePopover = { hidden: true };
 const fileDirectoryButton = {
   expanded: 'false',
@@ -92,6 +96,7 @@ const fullscreenButton = {
 
 const document = {
   documentElement: {},
+  head: documentHead,
   fullscreenElement: null,
   webkitFullscreenElement: null,
   querySelector(selector) {
@@ -109,6 +114,9 @@ const document = {
   getElementById(id) {
     if (id === 'nativeConnectionSettingsButton') {
       return settingsBody.children.find((item) => item.id === id) || null;
+    }
+    if (id === 'nativeLandscapeChatStyles') {
+      return documentHead.children.find((item) => item.id === id) || null;
     }
     return {
       app: appRoot,
@@ -146,6 +154,18 @@ assert.equal(fullscreenButton.tabIndex, -1);
 assert.equal(fullscreenButton.attributes['aria-hidden'], 'true');
 assert.equal(fullscreenButton.style.display, 'none');
 assert.equal(fullscreenButton.style.priority, 'important');
+assert.equal(documentHead.children.length, 1);
+const landscapeStyles = documentHead.children[0];
+assert.equal(landscapeStyles.id, 'nativeLandscapeChatStyles');
+assert.match(landscapeStyles.textContent, /orientation: landscape/);
+assert.match(landscapeStyles.textContent, /#chatView\.active \.message > \.agent-card/);
+assert.match(landscapeStyles.textContent, /#chatView\.active \.message\.user \.bubble/);
+assert.match(landscapeStyles.textContent, /padding: 5px 28px 5px 9px/);
+assert.match(landscapeStyles.textContent, /#chatView\.active \.composer textarea/);
+assert.match(landscapeStyles.textContent, /font-size: 11px/);
+assert.match(landscapeStyles.textContent, /max-height: 60px/);
+assert.match(landscapeStyles.textContent, /#jumpQuestionButton/);
+assert.match(landscapeStyles.textContent, /right: max\(12px, env\(safe-area-inset-right\)\)/);
 assert.equal(settingsBody.children.length, 1);
 const nativeSettingsButton = settingsBody.children[0];
 assert.equal(nativeSettingsButton.textContent, 'SSH 连接设置');
@@ -191,5 +211,6 @@ assert.equal(vm.runInNewContext(handleBackScript, context), false);
 
 vm.runInNewContext(patchScript, context, { filename: 'NativeUiPatch-reinject.js' });
 assert.equal(settingsBody.children.length, 1, 'reinjection must not duplicate the settings entry');
+assert.equal(documentHead.children.length, 1, 'reinjection must not duplicate landscape styles');
 
 console.log('Native UI navigation patch smoke test passed');
