@@ -2,7 +2,9 @@ package com.ningmengchang.codexcompanion
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -12,6 +14,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.provider.MediaStore
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
@@ -33,8 +36,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -60,9 +65,12 @@ import com.ningmengchang.codexcompanion.tunnel.TunnelRuntime
 import com.ningmengchang.codexcompanion.tunnel.TunnelService
 import com.ningmengchang.codexcompanion.tunnel.TunnelState
 import com.ningmengchang.codexcompanion.web.LocalOnlyWebViewClient
+import com.ningmengchang.codexcompanion.web.ImageChooserPolicy
 import com.ningmengchang.codexcompanion.web.NativeUiBridge
 import com.ningmengchang.codexcompanion.web.NativeUiPatch
+import com.ningmengchang.codexcompanion.web.RequestedImageSource
 import java.io.FileOutputStream
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -105,6 +113,9 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private var approvalDialogKey: String? = null
     private var currentTunnelState: TunnelState = TunnelState.Idle
     private var webFileCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingCameraUri: Uri? = null
+    @Volatile private var requestedImageSource: RequestedImageSource? = null
+    @Volatile private var requestedImageSourceUntil = 0L
     private var pendingDownload: PreparedArtifactDownload? = null
     private var webBackPending = false
     private var rootBackArmedAt = 0L
@@ -131,11 +142,16 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private val webFileLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        val callback = webFileCallback ?: return@registerForActivityResult
-        webFileCallback = null
-        callback.onReceiveValue(
-            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data),
-        )
+        val selected = extractSelectedUris(result.resultCode, result.data).ifEmpty {
+            pendingCameraUri?.takeIf { result.resultCode == Activity.RESULT_OK }?.let(::listOf).orEmpty()
+        }
+        completeWebFileSelection(selected)
+    }
+
+    private val galleryFileLauncher = registerForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_CHAT_IMAGES),
+    ) { uris ->
+        completeWebFileSelection(uris)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -155,13 +171,23 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
             NATIVE_NOTIFICATION_BRIDGE,
         )
         webView.addJavascriptInterface(
-            NativeUiBridge {
-                runOnUiThread {
-                    resetRootBackConfirmation()
-                    populateForm(configStore.load())
-                    showSetup()
-                }
-            },
+            NativeUiBridge(
+                onOpenConnectionSettings = {
+                    runOnUiThread {
+                        resetRootBackConfirmation()
+                        populateForm(configStore.load())
+                        showSetup()
+                    }
+                },
+                onCameraCaptureRequested = {
+                    requestedImageSource = RequestedImageSource.CAMERA
+                    requestedImageSourceUntil = SystemClock.elapsedRealtime() + IMAGE_SOURCE_REQUEST_WINDOW_MS
+                },
+                onGalleryPickerRequested = {
+                    requestedImageSource = RequestedImageSource.GALLERY
+                    requestedImageSourceUntil = SystemClock.elapsedRealtime() + IMAGE_SOURCE_REQUEST_WINDOW_MS
+                },
+            ),
             NATIVE_UI_BRIDGE,
         )
         configureActions()
@@ -189,6 +215,9 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     override fun onDestroy() {
         webFileCallback?.onReceiveValue(null)
         webFileCallback = null
+        pendingCameraUri = null
+        requestedImageSource = null
+        requestedImageSourceUntil = 0L
         if (!isChangingConfigurations) {
             shareManager.close()
             webView.removeJavascriptInterface(NATIVE_SHARE_BRIDGE)
@@ -341,10 +370,39 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
                 webFileCallback?.onReceiveValue(null)
                 webFileCallback = filePathCallback
                 return runCatching {
-                    webFileLauncher.launch(fileChooserParams.createIntent())
+                    val requestedSource = requestedImageSource
+                        ?.takeIf { SystemClock.elapsedRealtime() <= requestedImageSourceUntil }
+                    requestedImageSource = null
+                    requestedImageSourceUntil = 0L
+                    if (ImageChooserPolicy.shouldOpenCamera(
+                            requestedSource,
+                            fileChooserParams.isCaptureEnabled,
+                            fileChooserParams.acceptTypes,
+                        )
+                    ) {
+                        launchCameraChooser()
+                    } else if (ImageChooserPolicy.shouldOpenGalleryPicker(
+                            requestedSource,
+                            fileChooserParams.acceptTypes,
+                        )
+                    ) {
+                        pendingCameraUri = null
+                        galleryFileLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    } else {
+                        pendingCameraUri = null
+                        val chooserIntent = fileChooserParams.createIntent().apply {
+                            if (fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                            }
+                        }
+                        webFileLauncher.launch(chooserIntent)
+                    }
                     true
                 }.getOrElse {
                     webFileCallback = null
+                    pendingCameraUri = null
                     filePathCallback.onReceiveValue(null)
                     Toast.makeText(this@MainActivity, "无法打开手机文件选择器", Toast.LENGTH_SHORT).show()
                     false
@@ -361,6 +419,51 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
                 ),
             )
         }
+    }
+
+    private fun launchCameraChooser() {
+        val cameraDirectory = File(cacheDir, "camera").apply {
+            mkdirs()
+            listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > CAMERA_CACHE_TTL_MS }
+                ?.forEach { it.delete() }
+        }
+        val target = File.createTempFile("codex-photo-", ".jpg", cameraDirectory)
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", target)
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            clipData = ClipData.newRawUri("Codex 图片", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        check(intent.resolveActivity(packageManager) != null) { "手机上没有可用的相机应用" }
+        pendingCameraUri = uri
+        webFileLauncher.launch(intent)
+    }
+
+    private fun extractSelectedUris(resultCode: Int, data: Intent?): List<Uri> {
+        if (resultCode != Activity.RESULT_OK) return emptyList()
+        val selected = linkedSetOf<Uri>()
+        data?.clipData?.let { clip ->
+            repeat(clip.itemCount) { index ->
+                clip.getItemAt(index).uri?.let(selected::add)
+            }
+        }
+        data?.data?.let(selected::add)
+        if (selected.isEmpty()) {
+            WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+                ?.filterNotNull()
+                ?.forEach(selected::add)
+        }
+        return selected.toList()
+    }
+
+    private fun completeWebFileSelection(uris: List<Uri>) {
+        val callback = webFileCallback ?: run {
+            pendingCameraUri = null
+            return
+        }
+        webFileCallback = null
+        pendingCameraUri = null
+        callback.onReceiveValue(uris.distinct().takeIf { it.isNotEmpty() }?.toTypedArray())
     }
 
     private fun handleWebDownload(request: ArtifactDownloadRequest) {
@@ -731,5 +834,8 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         const val NATIVE_UI_BRIDGE = "CodexNativeUi"
         const val MAX_PRIVATE_KEY_BYTES = 2L * 1024L * 1024L
         const val ROOT_BACK_CONFIRM_MS = 2_000L
+        const val CAMERA_CACHE_TTL_MS = 24L * 60L * 60L * 1_000L
+        const val IMAGE_SOURCE_REQUEST_WINDOW_MS = 2_000L
+        const val MAX_CHAT_IMAGES = 4
     }
 }

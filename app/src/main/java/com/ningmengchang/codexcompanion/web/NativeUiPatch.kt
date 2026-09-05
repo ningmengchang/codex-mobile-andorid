@@ -25,9 +25,15 @@ object NativeUiPatch {
                   font-size: 12px;
                   line-height: 1.45;
                 }
-                #chatView.active .message.user .bubble {
+                #chatView.active .message.user .bubble:not(.has-images) {
                   padding: 5px 28px 5px 9px;
                   line-height: 1.4;
+                }
+                #chatView.active .message.user .bubble.has-images {
+                  padding: 4px;
+                }
+                #chatView.active .message.user .bubble.has-images.has-text {
+                  padding: 4px 28px 6px 7px;
                 }
                 #chatView.active .message > .agent-card,
                 #chatView.active .plan-card .tool-content.agent-card {
@@ -62,13 +68,13 @@ object NativeUiPatch {
                 #scrollLatestButton {
                   left: auto;
                   right: max(12px, env(safe-area-inset-right));
-                  bottom: calc(92px + var(--safe-bottom) + var(--kb-inset));
+                  bottom: calc(var(--composer-height) + 10px + var(--safe-bottom) + var(--kb-inset));
                   translate: 0;
                 }
                 #jumpQuestionButton {
                   left: auto;
                   right: max(12px, env(safe-area-inset-right));
-                  bottom: calc(132px + var(--safe-bottom) + var(--kb-inset));
+                  bottom: calc(var(--composer-height) + 50px + var(--safe-bottom) + var(--kb-inset));
                   translate: 0;
                 }
               }

@@ -7,11 +7,21 @@ import org.junit.Test
 class NativeUiBridgeTest {
     @Test
     fun forwardsConnectionSettingsRequestToNativeListener() {
-        var requests = 0
-        val bridge = NativeUiBridge { requests += 1 }
+        var settingsRequests = 0
+        var cameraRequests = 0
+        var galleryRequests = 0
+        val bridge = NativeUiBridge(
+            onOpenConnectionSettings = { settingsRequests += 1 },
+            onCameraCaptureRequested = { cameraRequests += 1 },
+            onGalleryPickerRequested = { galleryRequests += 1 },
+        )
 
         bridge.openConnectionSettings()
+        bridge.requestCameraCapture()
+        bridge.requestGalleryPicker()
 
-        assertEquals(1, requests)
+        assertEquals(1, settingsRequests)
+        assertEquals(1, cameraRequests)
+        assertEquals(1, galleryRequests)
     }
 }
