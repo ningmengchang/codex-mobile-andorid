@@ -35,22 +35,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class TunnelService : Service() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Lifecycle callbacks, state changes and notifications all run on the main thread.
+    // Only blocking SSH/file operations run on IO; cancelled results cannot publish new state.
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var configStore: ConfigStore
     private var connectionJob: Job? = null
 
-    @Volatile
     private var desiredConnected = false
-
-    @Volatile
-    private var activeSession: Session? = null
-
-    @Volatile
+    private var activeConnection: SshConnection? = null
     private var hostApproval: CompletableDeferred<Boolean>? = null
 
     override fun onCreate() {
@@ -65,63 +65,57 @@ class TunnelService : Service() {
             ACTION_DISCONNECT -> disconnectAndStop()
             ACTION_APPROVE_HOST -> hostApproval?.complete(true)
             ACTION_REJECT_HOST -> hostApproval?.complete(false)
-            null -> {
-                val config = configStore.load()
-                if (configStore.hasConfig() && config.autoConnect) beginConnection()
-                else stopSelf()
-            }
+            // Opening the Activity is the only automatic connection entry point.
+            else -> disconnectAndStop()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        val preserveError = TunnelRuntime.state.value is TunnelState.Error
-        desiredConnected = false
-        hostApproval?.cancel()
-        connectionJob?.cancel()
-        disconnectSession()
-        TunnelRuntime.pendingConfig = null
+        val finalState = TunnelRuntime.state.value.takeIf { it is TunnelState.Error } ?: TunnelState.Idle
+        stopTunnel(finalState)
         serviceScope.cancel()
-        if (!preserveError) TunnelRuntime.publish(TunnelState.Idle)
         super.onDestroy()
     }
 
     private fun beginConnection() {
         val config = TunnelRuntime.pendingConfig ?: configStore.load()
         config.validationError()?.let {
-            publish(TunnelState.Error(it))
+            stopTunnel(TunnelState.Error(it))
             stopSelf()
             return
         }
+        cancelConnection()
         desiredConnected = true
         startForegroundNotification("正在连接 ${config.host}")
-        hostApproval?.cancel()
-        connectionJob?.cancel()
-        disconnectSession()
         connectionJob = serviceScope.launch { runConnectionLoop(config) }
     }
 
     private suspend fun runConnectionLoop(config: ConnectionConfig) {
         var attempt = 0
-        while (desiredConnected && serviceScope.isActive) {
-            if (attempt == 0) publish(TunnelState.Connecting())
+        while (currentCoroutineContext().isActive) {
+            publish(TunnelState.Connecting(if (attempt == 0) "正在建立 SSH 连接…" else "正在重试 SSH 连接…"))
+            val connection = SshConnection(CONNECT_TIMEOUT_MS)
+            activeConnection = connection
             try {
-                connectOnce(config)
-                attempt = 0
-                monitorConnection()
-                if (desiredConnected) throw JSchException("SSH connection closed")
+                try {
+                    val session = connectOnce(config, connection)
+                    attempt = 0
+                    monitorConnection(session)
+                } finally {
+                    connection.close()
+                    // An old cancelled attempt must never close or clear a newer connection.
+                    if (activeConnection === connection) activeConnection = null
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                disconnectSession()
-                if (!desiredConnected) break
+                currentCoroutineContext().ensureActive()
                 val message = friendlyMessage(error)
                 if (isFatal(error)) {
-                    desiredConnected = false
-                    publish(TunnelState.Error(message))
-                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                    stopTunnel(TunnelState.Error(message))
                     stopSelf()
                     break
                 }
@@ -129,40 +123,41 @@ class TunnelService : Service() {
                 val waitSeconds = minOf(30L, 2L shl minOf(attempt - 1, 3))
                 publish(TunnelState.Reconnecting(attempt, waitSeconds, message))
                 delay(waitSeconds * 1_000)
-                publish(TunnelState.Connecting("正在重试 SSH 连接…"))
             }
         }
     }
 
-    private suspend fun connectOnce(config: ConnectionConfig) {
-        val jsch = JSch()
-        val knownHost = configStore.hasKnownHost(config.host, config.sshPort)
-        if (knownHost) jsch.setKnownHosts(configStore.knownHostsFile.absolutePath)
+    private suspend fun connectOnce(config: ConnectionConfig, connection: SshConnection): Session {
+        val (session, knownHost) = withContext(Dispatchers.IO) {
+            val jsch = JSch()
+            val knownHost = configStore.hasKnownHost(config.host, config.sshPort)
+            if (knownHost) jsch.setKnownHosts(configStore.knownHostsFile.absolutePath)
 
-        if (config.authMode == AuthMode.PRIVATE_KEY) {
-            val keyFile = File(config.privateKeyPath)
-            require(keyFile.isFile) { "导入的 SSH 私钥不存在，请重新导入" }
-            if (config.secret.isBlank()) jsch.addIdentity(keyFile.absolutePath)
-            else jsch.addIdentity(keyFile.absolutePath, config.secret.toByteArray(Charsets.UTF_8))
-        }
+            if (config.authMode == AuthMode.PRIVATE_KEY) {
+                val keyFile = File(config.privateKeyPath)
+                require(keyFile.isFile) { "导入的 SSH 私钥不存在，请重新导入" }
+                if (config.secret.isBlank()) jsch.addIdentity(keyFile.absolutePath)
+                else jsch.addIdentity(keyFile.absolutePath, config.secret.toByteArray(Charsets.UTF_8))
+            }
 
-        val session = jsch.getSession(config.username, config.host, config.sshPort)
-        activeSession = session
-        if (config.authMode == AuthMode.PASSWORD) {
-            session.setPassword(config.secret.toByteArray(Charsets.UTF_8))
+            val session = jsch.getSession(config.username, config.host, config.sshPort)
+            if (config.authMode == AuthMode.PASSWORD) {
+                session.setPassword(config.secret.toByteArray(Charsets.UTF_8))
+            }
+            session.setConfig(
+                Properties().apply {
+                    put("StrictHostKeyChecking", if (knownHost) "yes" else "no")
+                    put(
+                        "PreferredAuthentications",
+                        if (config.authMode == AuthMode.PRIVATE_KEY) "publickey" else "password,keyboard-interactive",
+                    )
+                },
+            )
+            session.serverAliveInterval = 15_000
+            session.serverAliveCountMax = 3
+            connection.connect(session)
+            session to knownHost
         }
-        session.setConfig(
-            Properties().apply {
-                put("StrictHostKeyChecking", if (knownHost) "yes" else "no")
-                put(
-                    "PreferredAuthentications",
-                    if (config.authMode == AuthMode.PRIVATE_KEY) "publickey" else "password,keyboard-interactive",
-                )
-            },
-        )
-        session.serverAliveInterval = 15_000
-        session.serverAliveCountMax = 3
-        session.connect(CONNECT_TIMEOUT_MS)
 
         if (!knownHost) {
             val hostKey = session.hostKey
@@ -174,51 +169,61 @@ class TunnelService : Service() {
                     fingerprint = sha256Fingerprint(hostKey.key),
                 ),
             )
-            val accepted = approval.await()
-            hostApproval = null
-            if (!accepted) {
-                desiredConnected = false
-                throw HostRejectedException()
+            val accepted = try {
+                approval.await()
+            } finally {
+                if (hostApproval === approval) hostApproval = null
             }
+            if (!accepted) throw HostRejectedException()
             check(session.isConnected) { "确认期间 SSH 连接已经断开，请重试" }
-            configStore.saveKnownHost(config.host, config.sshPort, hostKey.type, hostKey.key)
+            withContext(Dispatchers.IO) {
+                configStore.saveKnownHost(config.host, config.sshPort, hostKey.type, hostKey.key)
+            }
         }
 
-        session.setPortForwardingL(
-            "127.0.0.1",
-            config.localServicePort,
-            "127.0.0.1",
-            config.remoteServicePort,
-        )
+        withContext(Dispatchers.IO) {
+            connection.forwardLocalPort(config.localServicePort, config.remoteServicePort)
+        }
         publish(TunnelState.Connected(config.localUrl))
+        return session
     }
 
-    private suspend fun monitorConnection() {
-        while (desiredConnected && serviceScope.isActive) {
+    private suspend fun monitorConnection(session: Session) {
+        while (currentCoroutineContext().isActive) {
             delay(10_000)
-            val session = activeSession ?: throw JSchException("SSH session missing")
-            if (!session.isConnected) throw JSchException("SSH connection closed")
-            session.sendKeepAliveMsg()
+            withContext(Dispatchers.IO) {
+                if (!session.isConnected) throw JSchException("SSH connection closed")
+                session.sendKeepAliveMsg()
+            }
         }
     }
 
     private fun disconnectAndStop() {
-        desiredConnected = false
-        TunnelRuntime.pendingConfig = null
-        hostApproval?.cancel()
-        connectionJob?.cancel()
-        disconnectSession()
-        publish(TunnelState.Idle)
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopTunnel()
         stopSelf()
     }
 
-    private fun disconnectSession() {
-        runCatching { activeSession?.disconnect() }
-        activeSession = null
+    private fun cancelConnection() {
+        desiredConnected = false
+        hostApproval?.cancel()
+        hostApproval = null
+        connectionJob?.cancel()
+        connectionJob = null
+        activeConnection?.close()
+        activeConnection = null
+    }
+
+    private fun stopTunnel(finalState: TunnelState = TunnelState.Idle) {
+        cancelConnection()
+        TunnelRuntime.pendingConfig = null
+        // Stopping updates the UI without posting another "connection stopped" notification.
+        TunnelRuntime.publish(finalState)
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     }
 
     private fun publish(state: TunnelState) {
+        if (!desiredConnected) return
         TunnelRuntime.publish(state)
         val text = when (state) {
             TunnelState.Idle -> "连接已停止"

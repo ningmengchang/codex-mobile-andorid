@@ -1,6 +1,9 @@
 package com.ningmengchang.codexcompanion.tunnel
 
 sealed interface TunnelState {
+    val isActive: Boolean
+        get() = this != Idle && this !is Error
+
     data object Idle : TunnelState
     data class Connecting(val message: String = "正在建立 SSH 连接…") : TunnelState
     data class AwaitingHostApproval(

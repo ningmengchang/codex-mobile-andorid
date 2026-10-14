@@ -196,7 +196,11 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
 
         val saved = configStore.load()
         populateForm(saved)
-        if (configStore.hasConfig() && saved.autoConnect && saved.validationError() == null) {
+        val existingTunnel = TunnelRuntime.state.value
+        if (existingTunnel.isActive) {
+            currentTunnelState = existingTunnel
+            renderTunnelState(existingTunnel)
+        } else if (configStore.hasConfig() && saved.autoConnect && saved.validationError() == null) {
             TunnelRuntime.pendingConfig = saved
             showLoading("正在连接电脑…")
             requestNotificationThenConnect()
@@ -662,6 +666,7 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     }
 
     private fun startTunnel() {
+        if (isFinishing || isDestroyed) return
         TunnelService.connect(this)
     }
 
