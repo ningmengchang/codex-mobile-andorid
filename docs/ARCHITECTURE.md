@@ -32,7 +32,23 @@ TunnelService（前台服务）
 - `tunnel/`：前台服务、SSH 生命周期、端口转发、重连状态。
 - `web/`：WebView 导航白名单与页面生命周期。
 - `share/`：网页分享兼容补丁、原生桥、下载、MIME 判断、FileProvider。
-- `MainActivity.kt`：界面编排、文件选择、全屏/返回键和状态展示。
+- `MainActivity.kt`：Activity 生命周期、五个 ActivityResult 注册、窗口 Insets 和连接状态编排。
+- `config/ConnectionFormController.kt`：表单、输入校验所需配置读取、私钥导入；沿用 ConfigStore/Keystore。
+- `web/WebViewController.kt`：WebView 安全设置与三个稳定的原生桥入口。
+- `web/ImageInputController.kt`：相机/相册/文件选择意图和回调状态；Activity 负责注册和投递结果。
+- `download/DownloadPermissionController.kt`：下载准备、旧版存储权限结果与 DownloadManager 交接。
+- `navigation/BackNavigationController.kt`：返回策略、网页返回委托和双击回桌面确认。
+- `share/ShareProgressController.kt`：分享进度界面与稳定的网页 resolve/reject 回调。
+
+## 重构兼容边界
+
+起点 `c6da004`。本次只拆分职责，未改变包名、版本、签名、SharedPreferences 名称、Keystore 别名、登录和 SSH 配置存储。布局资源和业务交互保持原样。三个原生桥的名称与方法参数不变。
+
+相机/分享/下载分别管理各自状态，不混用原生 DownloadManager 的后台任务与 NativeShareManager 的流式缓存。导航和产出物读取共用纯 `LocalOriginPolicy`，产出物校验仍额外拒绝用户信息、fragment 和非 raw 路径。
+
+Activity 旋转继续复用 `TunnelRuntime.state`；`onDestroy` 的配置变更分支、服务保活/重连/任务划走清理和 SSH 指纹确认不改。本次没有重写 TunnelService。
+
+验证入口：`scripts/build-debug-apk.sh` 执行原生补丁脚本、控制器接线约束、JVM 单测、Lint 和 APK 构建。接线约束检查不替代真实手机的相机、系统返回、旋转、通知与分享验收。
 
 ## 分享兼容机制
 

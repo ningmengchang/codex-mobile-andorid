@@ -54,10 +54,7 @@ class LocalOnlyWebViewClient(
     companion object {
         fun isAllowed(rawUrl: String, port: Int): Boolean {
             val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return false
-            if (!uri.scheme.equals("http", ignoreCase = true)) return false
-            if (uri.host != "127.0.0.1" && !uri.host.equals("localhost", ignoreCase = true)) return false
-            val effectivePort = if (uri.port == -1) 80 else uri.port
-            return effectivePort == port
+            return LocalOriginPolicy.allows(uri.scheme, uri.host, uri.port, port)
         }
     }
 }

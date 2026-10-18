@@ -1,45 +1,23 @@
 package com.ningmengchang.codexcompanion
 
 import android.Manifest
-import android.annotation.SuppressLint
-import android.app.Activity
 import android.app.AlertDialog
-import android.content.ClipData
 import android.content.Context
-import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
-import android.provider.OpenableColumns
-import android.provider.MediaStore
 import android.view.View
 import android.view.inputmethod.InputMethodManager
-import android.webkit.CookieManager
-import android.webkit.PermissionRequest
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebSettings
 import android.webkit.WebView
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -48,39 +26,31 @@ import androidx.core.view.updatePadding
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.ningmengchang.codexcompanion.config.AuthMode
 import com.ningmengchang.codexcompanion.config.ConfigStore
-import com.ningmengchang.codexcompanion.config.ConnectionConfig
-import com.ningmengchang.codexcompanion.download.ArtifactDownloadRequest
-import com.ningmengchang.codexcompanion.download.NativeDownloadManager
-import com.ningmengchang.codexcompanion.download.PreparedArtifactDownload
-import com.ningmengchang.codexcompanion.navigation.BackAction
-import com.ningmengchang.codexcompanion.navigation.BackNavigationPolicy
+import com.ningmengchang.codexcompanion.config.ConnectionFormController
+import com.ningmengchang.codexcompanion.download.DownloadPermissionController
+import com.ningmengchang.codexcompanion.navigation.BackNavigationController
 import com.ningmengchang.codexcompanion.navigation.BackNavigationSnapshot
-import com.ningmengchang.codexcompanion.notification.NativeNotificationBridge
 import com.ningmengchang.codexcompanion.notification.ThreadStatusNotifier
-import com.ningmengchang.codexcompanion.share.NativeShareBridge
 import com.ningmengchang.codexcompanion.share.NativeShareManager
+import com.ningmengchang.codexcompanion.share.ShareProgressController
 import com.ningmengchang.codexcompanion.tunnel.TunnelRuntime
 import com.ningmengchang.codexcompanion.tunnel.TunnelService
 import com.ningmengchang.codexcompanion.tunnel.TunnelState
-import com.ningmengchang.codexcompanion.web.LocalOnlyWebViewClient
-import com.ningmengchang.codexcompanion.web.ImageChooserPolicy
-import com.ningmengchang.codexcompanion.web.NativeUiBridge
-import com.ningmengchang.codexcompanion.web.NativeUiPatch
-import com.ningmengchang.codexcompanion.web.RequestedImageSource
-import java.io.FileOutputStream
-import java.io.File
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
+import com.ningmengchang.codexcompanion.web.ImageInputController
+import com.ningmengchang.codexcompanion.web.WebViewController
 import kotlin.math.max
+import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity(), NativeShareManager.Listener {
+class MainActivity : ComponentActivity() {
     private lateinit var configStore: ConfigStore
+    private lateinit var connectionForm: ConnectionFormController
+    private lateinit var images: ImageInputController
+    private lateinit var downloads: DownloadPermissionController
+    private lateinit var shareProgress: ShareProgressController
+    private lateinit var webController: WebViewController
+    private lateinit var backNavigation: BackNavigationController
     private lateinit var shareManager: NativeShareManager
-    private lateinit var downloadManager: NativeDownloadManager
     private lateinit var threadStatusNotifier: ThreadStatusNotifier
 
     private lateinit var root: View
@@ -91,34 +61,11 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private lateinit var setupStatusText: TextView
     private lateinit var connectButton: Button
     private lateinit var disconnectButton: Button
-    private lateinit var hostInput: EditText
-    private lateinit var sshPortInput: EditText
-    private lateinit var usernameInput: EditText
-    private lateinit var authModeSpinner: Spinner
-    private lateinit var secretLabel: TextView
-    private lateinit var secretInput: EditText
-    private lateinit var privateKeyRow: LinearLayout
-    private lateinit var keyStatusText: TextView
-    private lateinit var rememberSecretCheck: CheckBox
-    private lateinit var autoConnectCheck: CheckBox
-    private lateinit var remotePortInput: EditText
-    private lateinit var localPortInput: EditText
-    private lateinit var shareProgressPanel: View
-    private lateinit var shareProgressText: TextView
-    private lateinit var shareProgressBar: ProgressBar
 
-    private var importedPrivateKeyPath = ""
     private var pageReady = false
     private var connectedUrl: String? = null
     private var approvalDialogKey: String? = null
     private var currentTunnelState: TunnelState = TunnelState.Idle
-    private var webFileCallback: ValueCallback<Array<Uri>>? = null
-    private var pendingCameraUri: Uri? = null
-    @Volatile private var requestedImageSource: RequestedImageSource? = null
-    @Volatile private var requestedImageSourceUntil = 0L
-    private var pendingDownload: PreparedArtifactDownload? = null
-    private var webBackPending = false
-    private var rootBackArmedAt = 0L
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -127,31 +74,25 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     private val legacyStoragePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        val download = pendingDownload
-        pendingDownload = null
-        if (granted && download != null) enqueueDownload(download)
-        else if (!granted) Toast.makeText(this, "没有存储权限，文件未下载", Toast.LENGTH_LONG).show()
+        downloads.onPermissionResult(granted)
     }
 
     private val privateKeyLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        if (uri != null) importPrivateKey(uri)
+        if (uri != null) connectionForm.importPrivateKey(uri)
     }
 
     private val webFileLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        val selected = extractSelectedUris(result.resultCode, result.data).ifEmpty {
-            pendingCameraUri?.takeIf { result.resultCode == Activity.RESULT_OK }?.let(::listOf).orEmpty()
-        }
-        completeWebFileSelection(selected)
+        images.onFileResult(result.resultCode, result.data)
     }
 
     private val galleryFileLauncher = registerForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(MAX_CHAT_IMAGES),
     ) { uris ->
-        completeWebFileSelection(uris)
+        images.completeSelection(uris)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -159,43 +100,43 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         setContentView(R.layout.activity_main)
         configStore = ConfigStore(this)
         bindViews()
-        downloadManager = NativeDownloadManager(this)
+        connectionForm = ConnectionFormController(this, configStore, ::showSetupError)
+        images = ImageInputController(this, { webFileLauncher.launch(it) }, {
+            galleryFileLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        })
+        downloads = DownloadPermissionController(this, { connectionForm.activeConfig().localServicePort }, {
+            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        })
+        shareProgress = ShareProgressController(this, webView)
+        backNavigation = BackNavigationController(this, webView, {
+            BackNavigationSnapshot(
+                shareInProgress = shareProgress.isSharing,
+                setupVisible = setupScroll.visibility == View.VISIBLE,
+                webVisible = webView.visibility == View.VISIBLE,
+                tunnelConnected = currentTunnelState is TunnelState.Connected,
+            )
+        }, {
+            connectedUrl?.let { runCatching { Uri.parse(it).port }.getOrNull() }
+                ?.takeIf { it > 0 } ?: configStore.load().localServicePort
+        }, { shareManager.cancelActiveShare() }, ::showWeb)
         threadStatusNotifier = ThreadStatusNotifier(this)
         configureWindowInsets()
-        configureForm()
+        connectionForm.configure()
         configureWebView()
-        shareManager = NativeShareManager(this, { activeConfig().localServicePort }, this)
-        webView.addJavascriptInterface(NativeShareBridge(shareManager), NATIVE_SHARE_BRIDGE)
-        webView.addJavascriptInterface(
-            NativeNotificationBridge(threadStatusNotifier::notify),
-            NATIVE_NOTIFICATION_BRIDGE,
-        )
-        webView.addJavascriptInterface(
-            NativeUiBridge(
-                onOpenConnectionSettings = {
-                    runOnUiThread {
-                        resetRootBackConfirmation()
-                        populateForm(configStore.load())
-                        showSetup()
-                    }
-                },
-                onCameraCaptureRequested = {
-                    requestedImageSource = RequestedImageSource.CAMERA
-                    requestedImageSourceUntil = SystemClock.elapsedRealtime() + IMAGE_SOURCE_REQUEST_WINDOW_MS
-                },
-                onGalleryPickerRequested = {
-                    requestedImageSource = RequestedImageSource.GALLERY
-                    requestedImageSourceUntil = SystemClock.elapsedRealtime() + IMAGE_SOURCE_REQUEST_WINDOW_MS
-                },
-            ),
-            NATIVE_UI_BRIDGE,
-        )
+        shareManager = NativeShareManager(this, { connectionForm.activeConfig().localServicePort }, shareProgress)
+        webController.installBridges(shareManager, threadStatusNotifier) {
+            runOnUiThread {
+                backNavigation.reset()
+                connectionForm.populate(configStore.load())
+                showSetup()
+            }
+        }
         configureActions()
         observeTunnel()
-        configureBackNavigation()
+        backNavigation.install()
 
         val saved = configStore.load()
-        populateForm(saved)
+        connectionForm.populate(saved)
         val existingTunnel = TunnelRuntime.state.value
         if (existingTunnel.isActive) {
             currentTunnelState = existingTunnel
@@ -217,18 +158,10 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     }
 
     override fun onDestroy() {
-        webFileCallback?.onReceiveValue(null)
-        webFileCallback = null
-        pendingCameraUri = null
-        requestedImageSource = null
-        requestedImageSourceUntil = 0L
+        images.dispose()
         if (!isChangingConfigurations) {
             shareManager.close()
-            webView.removeJavascriptInterface(NATIVE_SHARE_BRIDGE)
-            webView.removeJavascriptInterface(NATIVE_NOTIFICATION_BRIDGE)
-            webView.removeJavascriptInterface(NATIVE_UI_BRIDGE)
-            webView.stopLoading()
-            webView.destroy()
+            webController.destroy()
         }
         super.onDestroy()
     }
@@ -242,21 +175,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         setupStatusText = findViewById(R.id.setupStatusText)
         connectButton = findViewById(R.id.connectButton)
         disconnectButton = findViewById(R.id.disconnectButton)
-        hostInput = findViewById(R.id.hostInput)
-        sshPortInput = findViewById(R.id.sshPortInput)
-        usernameInput = findViewById(R.id.usernameInput)
-        authModeSpinner = findViewById(R.id.authModeSpinner)
-        secretLabel = findViewById(R.id.secretLabel)
-        secretInput = findViewById(R.id.secretInput)
-        privateKeyRow = findViewById(R.id.privateKeyRow)
-        keyStatusText = findViewById(R.id.keyStatusText)
-        rememberSecretCheck = findViewById(R.id.rememberSecretCheck)
-        autoConnectCheck = findViewById(R.id.autoConnectCheck)
-        remotePortInput = findViewById(R.id.remotePortInput)
-        localPortInput = findViewById(R.id.localPortInput)
-        shareProgressPanel = findViewById(R.id.shareProgressPanel)
-        shareProgressText = findViewById(R.id.shareProgressText)
-        shareProgressBar = findViewById(R.id.shareProgressBar)
     }
 
     private fun configureWindowInsets() {
@@ -272,28 +190,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
             insets
         }
         ViewCompat.requestApplyInsets(root)
-    }
-
-    private fun configureForm() {
-        val adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            listOf("密码", "私钥"),
-        ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        authModeSpinner.adapter = adapter
-        authModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val privateKey = position == AuthMode.PRIVATE_KEY.ordinal
-                privateKeyRow.visibility = if (privateKey) View.VISIBLE else View.GONE
-                secretLabel.text = if (privateKey) "私钥口令（没有可留空）" else "SSH 密码"
-                secretInput.hint = if (privateKey) "私钥没有口令时留空" else "仅加密保存在这台手机"
-            }
-
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-        }
-        rememberSecretCheck.setOnCheckedChangeListener { _, checked ->
-            if (!checked && secretInput.text.isNotEmpty()) autoConnectCheck.isChecked = false
-        }
     }
 
     private fun configureActions() {
@@ -315,35 +211,10 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     private fun configureWebView() {
-        WebView.setWebContentsDebuggingEnabled(
-            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
-        )
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, false)
-        }
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            allowFileAccess = false
-            allowContentAccess = true
-            javaScriptCanOpenWindowsAutomatically = false
-            setSupportMultipleWindows(false)
-            setSupportZoom(false)
-            builtInZoomControls = false
-            displayZoomControls = false
-            mediaPlaybackRequiresUserGesture = true
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            cacheMode = WebSettings.LOAD_DEFAULT
-            userAgentString = "$userAgentString CodexCompanion/0.1"
-        }
-        webView.webViewClient = LocalOnlyWebViewClient(
-            localPort = { activeConfig().localServicePort },
-            onPageStarted = {
-                if (!pageReady) showLoading("正在加载 Codex 随行…")
-            },
+        webController = WebViewController(
+            this, webView, { connectionForm.activeConfig().localServicePort },
+            onPageStarted = { if (!pageReady) showLoading("正在加载 Codex 随行…") },
             onPageReady = {
                 pageReady = true
                 loadingOverlay.visibility = View.GONE
@@ -360,141 +231,10 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
                     }, 1_500)
                 }
             },
+            images = images,
+            onDownload = downloads::handle,
         )
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onPermissionRequest(request: PermissionRequest) {
-                request.deny()
-            }
-
-            override fun onShowFileChooser(
-                webView: WebView,
-                filePathCallback: ValueCallback<Array<Uri>>,
-                fileChooserParams: FileChooserParams,
-            ): Boolean {
-                webFileCallback?.onReceiveValue(null)
-                webFileCallback = filePathCallback
-                return runCatching {
-                    val requestedSource = requestedImageSource
-                        ?.takeIf { SystemClock.elapsedRealtime() <= requestedImageSourceUntil }
-                    requestedImageSource = null
-                    requestedImageSourceUntil = 0L
-                    if (ImageChooserPolicy.shouldOpenCamera(
-                            requestedSource,
-                            fileChooserParams.isCaptureEnabled,
-                            fileChooserParams.acceptTypes,
-                        )
-                    ) {
-                        launchCameraChooser()
-                    } else if (ImageChooserPolicy.shouldOpenGalleryPicker(
-                            requestedSource,
-                            fileChooserParams.acceptTypes,
-                        )
-                    ) {
-                        pendingCameraUri = null
-                        galleryFileLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                        )
-                    } else {
-                        pendingCameraUri = null
-                        val chooserIntent = fileChooserParams.createIntent().apply {
-                            if (fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
-                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                            }
-                        }
-                        webFileLauncher.launch(chooserIntent)
-                    }
-                    true
-                }.getOrElse {
-                    webFileCallback = null
-                    pendingCameraUri = null
-                    filePathCallback.onReceiveValue(null)
-                    Toast.makeText(this@MainActivity, "无法打开手机文件选择器", Toast.LENGTH_SHORT).show()
-                    false
-                }
-            }
-        }
-        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-            handleWebDownload(
-                ArtifactDownloadRequest(
-                    url = url.orEmpty(),
-                    userAgent = userAgent.orEmpty(),
-                    contentDisposition = contentDisposition.orEmpty(),
-                    mimeType = mimeType.orEmpty(),
-                ),
-            )
-        }
-    }
-
-    private fun launchCameraChooser() {
-        val cameraDirectory = File(cacheDir, "camera").apply {
-            mkdirs()
-            listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > CAMERA_CACHE_TTL_MS }
-                ?.forEach { it.delete() }
-        }
-        val target = File.createTempFile("codex-photo-", ".jpg", cameraDirectory)
-        val uri = FileProvider.getUriForFile(this, "$packageName.files", target)
-        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
-            putExtra(MediaStore.EXTRA_OUTPUT, uri)
-            clipData = ClipData.newRawUri("Codex 图片", uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        }
-        check(intent.resolveActivity(packageManager) != null) { "手机上没有可用的相机应用" }
-        pendingCameraUri = uri
-        webFileLauncher.launch(intent)
-    }
-
-    private fun extractSelectedUris(resultCode: Int, data: Intent?): List<Uri> {
-        if (resultCode != Activity.RESULT_OK) return emptyList()
-        val selected = linkedSetOf<Uri>()
-        data?.clipData?.let { clip ->
-            repeat(clip.itemCount) { index ->
-                clip.getItemAt(index).uri?.let(selected::add)
-            }
-        }
-        data?.data?.let(selected::add)
-        if (selected.isEmpty()) {
-            WebChromeClient.FileChooserParams.parseResult(resultCode, data)
-                ?.filterNotNull()
-                ?.forEach(selected::add)
-        }
-        return selected.toList()
-    }
-
-    private fun completeWebFileSelection(uris: List<Uri>) {
-        val callback = webFileCallback ?: run {
-            pendingCameraUri = null
-            return
-        }
-        webFileCallback = null
-        pendingCameraUri = null
-        callback.onReceiveValue(uris.distinct().takeIf { it.isNotEmpty() }?.toTypedArray())
-    }
-
-    private fun handleWebDownload(request: ArtifactDownloadRequest) {
-        val prepared = downloadManager.prepare(request, activeConfig().localServicePort)
-            .getOrElse { error ->
-                Toast.makeText(this, error.message ?: "下载链接无效", Toast.LENGTH_LONG).show()
-                return
-            }
-        if (
-            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-        ) {
-            pendingDownload = prepared
-            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            return
-        }
-        enqueueDownload(prepared)
-    }
-
-    private fun enqueueDownload(download: PreparedArtifactDownload) {
-        downloadManager.enqueue(download)
-            .onSuccess {
-                Toast.makeText(this, "已开始下载“${download.displayName}”，可在通知栏查看", Toast.LENGTH_LONG).show()
-            }
-            .onFailure { error ->
-                Toast.makeText(this, error.message ?: "无法启动下载", Toast.LENGTH_LONG).show()
-            }
+        webController.configure()
     }
 
     private fun observeTunnel() {
@@ -558,13 +298,13 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
     }
 
     private fun saveAndConnect() {
-        val config = activeConfig()
+        val config = connectionForm.activeConfig()
         val error = config.validationError()
         if (error != null) {
             showSetupError(error)
             return
         }
-        if (autoConnectCheck.isChecked && !config.autoConnect) {
+        if (connectionForm.autoConnectSelected && !config.autoConnect) {
             Toast.makeText(this, "未保存口令，本次可连接，但下次需手动输入", Toast.LENGTH_LONG).show()
         }
         configStore.save(config)
@@ -572,86 +312,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         hideKeyboard()
         showLoading("正在建立 SSH 连接…")
         requestNotificationThenConnect()
-    }
-
-    private fun activeConfig(): ConnectionConfig {
-        val authMode = if (authModeSpinner.selectedItemPosition == AuthMode.PRIVATE_KEY.ordinal) {
-            AuthMode.PRIVATE_KEY
-        } else {
-            AuthMode.PASSWORD
-        }
-        val secret = secretInput.text?.toString().orEmpty()
-        val remember = rememberSecretCheck.isChecked
-        return ConnectionConfig(
-            host = hostInput.text?.toString().orEmpty().trim(),
-            sshPort = sshPortInput.text?.toString()?.toIntOrNull() ?: -1,
-            username = usernameInput.text?.toString().orEmpty().trim(),
-            authMode = authMode,
-            secret = secret,
-            privateKeyPath = importedPrivateKeyPath,
-            rememberSecret = remember,
-            autoConnect = autoConnectCheck.isChecked && (remember || secret.isBlank()),
-            remoteServicePort = remotePortInput.text?.toString()?.toIntOrNull() ?: -1,
-            localServicePort = localPortInput.text?.toString()?.toIntOrNull() ?: -1,
-        )
-    }
-
-    private fun populateForm(config: ConnectionConfig) {
-        hostInput.setText(config.host)
-        sshPortInput.setText(config.sshPort.toString())
-        usernameInput.setText(config.username)
-        authModeSpinner.setSelection(config.authMode.ordinal)
-        secretInput.setText(config.secret)
-        importedPrivateKeyPath = config.privateKeyPath
-        keyStatusText.text = if (config.privateKeyPath.isNotBlank()) "已导入私钥" else "尚未导入"
-        rememberSecretCheck.isChecked = config.rememberSecret
-        autoConnectCheck.isChecked = config.autoConnect
-        remotePortInput.setText(config.remoteServicePort.toString())
-        localPortInput.setText(config.localServicePort.toString())
-    }
-
-    private fun importPrivateKey(uri: Uri) {
-        lifecycleScope.launch {
-            val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    val target = configStore.importedPrivateKeyFile()
-                    val temporary = java.io.File(target.parentFile, "${target.name}.tmp")
-                    try {
-                        contentResolver.openInputStream(uri).use { input ->
-                            requireNotNull(input) { "无法读取所选私钥" }
-                            FileOutputStream(temporary, false).use { output ->
-                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                                var copied = 0L
-                                while (true) {
-                                    val count = input.read(buffer)
-                                    if (count < 0) break
-                                    copied += count
-                                    require(copied <= MAX_PRIVATE_KEY_BYTES) { "私钥文件过大" }
-                                    output.write(buffer, 0, count)
-                                }
-                            }
-                        }
-                        require(temporary.length() > 0) { "私钥文件为空" }
-                        temporary.copyTo(target, overwrite = true)
-                    } finally {
-                        temporary.delete()
-                    }
-                    target.absolutePath
-                }
-            }
-            result.onSuccess { path ->
-                importedPrivateKeyPath = path
-                keyStatusText.text = "已导入：${displayName(uri)}"
-            }.onFailure { error ->
-                showSetupError(error.message ?: "私钥导入失败")
-            }
-        }
-    }
-
-    private fun displayName(uri: Uri): String {
-        return contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getString(0) else null
-        } ?: "私钥"
     }
 
     private fun requestNotificationThenConnect() {
@@ -706,76 +366,6 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         ViewCompat.requestApplyInsets(root)
     }
 
-    private fun configureBackNavigation() {
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                val action = BackNavigationPolicy.decide(
-                    BackNavigationSnapshot(
-                        shareInProgress = shareProgressPanel.visibility == View.VISIBLE,
-                        setupVisible = setupScroll.visibility == View.VISIBLE,
-                        webVisible = webView.visibility == View.VISIBLE,
-                        tunnelConnected = currentTunnelState is TunnelState.Connected,
-                    ),
-                )
-                when (action) {
-                    BackAction.CANCEL_SHARE -> {
-                        resetRootBackConfirmation()
-                        shareManager.cancelActiveShare()
-                    }
-                    BackAction.RETURN_TO_WEB -> {
-                        resetRootBackConfirmation()
-                        showWeb()
-                    }
-                    BackAction.DELEGATE_TO_WEB -> handleWebBack()
-                    BackAction.CONFIRM_BACKGROUND -> confirmBackground()
-                }
-            }
-        })
-    }
-
-    private fun handleWebBack() {
-        if (webBackPending) return
-        webBackPending = true
-        webView.evaluateJavascript(NativeUiPatch.handleBackScript) { rawResult ->
-            webBackPending = false
-            if (BackNavigationPolicy.javascriptConsumed(rawResult)) {
-                resetRootBackConfirmation()
-                return@evaluateJavascript
-            }
-            if (canGoBackWithinApp()) {
-                resetRootBackConfirmation()
-                webView.goBack()
-            } else {
-                confirmBackground()
-            }
-        }
-    }
-
-    private fun canGoBackWithinApp(): Boolean {
-        val history = webView.copyBackForwardList()
-        if (history.currentIndex <= 0) return false
-        val previousUrl = history.getItemAtIndex(history.currentIndex - 1)?.url ?: return false
-        val port = connectedUrl?.let { runCatching { Uri.parse(it).port }.getOrNull() }
-            ?.takeIf { it > 0 }
-            ?: configStore.load().localServicePort
-        return LocalOnlyWebViewClient.isAllowed(previousUrl, port)
-    }
-
-    private fun confirmBackground() {
-        val now = SystemClock.elapsedRealtime()
-        if (rootBackArmedAt > 0 && now - rootBackArmedAt <= ROOT_BACK_CONFIRM_MS) {
-            rootBackArmedAt = 0L
-            moveTaskToBack(true)
-            return
-        }
-        rootBackArmedAt = now
-        Toast.makeText(this, "已到首页，再按一次返回桌面", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun resetRootBackConfirmation() {
-        rootBackArmedAt = 0L
-    }
-
     private fun hideKeyboard() {
         (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
             .hideSoftInputFromWindow(currentFocus?.windowToken, 0)
@@ -792,55 +382,5 @@ class MainActivity : ComponentActivity(), NativeShareManager.Listener {
         WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
     }
 
-    override fun onShareStarted(fileName: String) {
-        shareProgressText.text = "正在从电脑读取 $fileName…"
-        shareProgressBar.isIndeterminate = true
-        shareProgressPanel.visibility = View.VISIBLE
-        updateWebShareProgress("正在从电脑读取文件…")
-    }
-
-    override fun onShareProgress(fileName: String, percent: Int?) {
-        shareProgressText.text = if (percent == null) "正在读取 $fileName…" else "正在读取 $fileName · $percent%"
-        shareProgressBar.isIndeterminate = percent == null
-        if (percent != null) shareProgressBar.progress = percent
-        updateWebShareProgress(if (percent == null) "正在从电脑读取文件…" else "正在从电脑读取文件… $percent%")
-    }
-
-    override fun onShareReady(requestId: String) {
-        shareProgressPanel.visibility = View.GONE
-        evaluateShareCallback("__codexNativeShareResolve", requestId)
-    }
-
-    override fun onShareFailed(requestId: String, message: String) {
-        shareProgressPanel.visibility = View.GONE
-        evaluateShareCallback("__codexNativeShareReject", requestId, message)
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-    }
-
-    private fun updateWebShareProgress(message: String) {
-        val quoted = JSONObject.quote(message)
-        webView.evaluateJavascript(
-            "window.__codexNativeShareProgress && window.__codexNativeShareProgress($quoted);",
-            null,
-        )
-    }
-
-    private fun evaluateShareCallback(function: String, requestId: String, message: String? = null) {
-        val arguments = buildString {
-            append(JSONObject.quote(requestId))
-            if (message != null) append(',').append(JSONObject.quote(message))
-        }
-        webView.evaluateJavascript("window.$function && window.$function($arguments);", null)
-    }
-
-    private companion object {
-        const val NATIVE_SHARE_BRIDGE = "CodexNativeShare"
-        const val NATIVE_NOTIFICATION_BRIDGE = "CodexNativeNotifications"
-        const val NATIVE_UI_BRIDGE = "CodexNativeUi"
-        const val MAX_PRIVATE_KEY_BYTES = 2L * 1024L * 1024L
-        const val ROOT_BACK_CONFIRM_MS = 2_000L
-        const val CAMERA_CACHE_TTL_MS = 24L * 60L * 60L * 1_000L
-        const val IMAGE_SOURCE_REQUEST_WINDOW_MS = 2_000L
-        const val MAX_CHAT_IMAGES = 4
-    }
+    private companion object { const val MAX_CHAT_IMAGES = 4 }
 }

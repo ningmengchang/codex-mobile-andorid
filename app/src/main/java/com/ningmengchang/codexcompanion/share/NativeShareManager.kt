@@ -3,7 +3,6 @@ package com.ningmengchang.codexcompanion.share
 import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
-import android.net.Uri
 import android.webkit.CookieManager
 import androidx.core.content.FileProvider
 import java.io.BufferedInputStream

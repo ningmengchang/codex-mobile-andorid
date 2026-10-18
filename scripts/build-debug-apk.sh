@@ -7,6 +7,7 @@ cd "$project_dir"
 if command -v node >/dev/null 2>&1; then
   node scripts/test-native-share-patch.mjs
   node scripts/test-native-ui-patch.mjs
+  node scripts/test-controller-wiring.mjs
 fi
 
 ./gradlew testDebugUnitTest lintDebug assembleDebug
